@@ -5,8 +5,8 @@ import MyContext from './Context';
 export const MyProvider = ({ children }) => {
   const [user, setUser] = useState(null);
 
-  const login = (userData) => {
-    setUser(userData);
+  const login = () => {
+    setUser(true);
   }
 
   const logout = () => {

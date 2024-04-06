@@ -169,7 +169,7 @@ def login():
     user = User.authenticate(data['email'], data['password'])
     if user:
         UserSession.get_instance().login(user)
-        return 'Logged in successfully'
+        return 'Logged in successfully', 200
     else:
         return 'Login failed', 401
 
