@@ -14,7 +14,8 @@ def db_initialization():
     cursor.execute('''CREATE TABLE IF NOT EXISTS Users (
                           UserID INTEGER PRIMARY KEY AUTOINCREMENT,
                           Email TEXT NOT NULL UNIQUE,
-                          Password TEXT NOT NULL
+                          Password TEXT NOT NULL,
+                          WalletBalance REAL DEFAULT 0
                       )''')
 
     # Create SecurityQuestions table
@@ -93,10 +94,10 @@ def db_initialization():
                         NotificationID INTEGER PRIMARY KEY AUTOINCREMENT,
                         UserID INTEGER NOT NULL,
                         Message TEXT NOT NULL,
-                        Acknowledged INTEGER DEFAULT 0,  -- 0 for false, 1 for true
-                        RelatedEntityID INTEGER,  -- This could be a BookingID or any other relevant entity ID
+                        Acknowledged INTEGER DEFAULT 0,
+                        RelatedEntityID INTEGER,
                         FOREIGN KEY (UserID) REFERENCES Users(UserID)
-                    );
+                    )
                     ''')
     
     # Create Booking Requests table
@@ -109,7 +110,21 @@ def db_initialization():
                         Status TEXT NOT NULL,
                         FOREIGN KEY (ListingID) REFERENCES CarListing(ListingID),
                         FOREIGN KEY (RequesterID) REFERENCES Users(UserID)
-                    );
+                    )
+                    ''')
+    
+    # Create Payments table
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Payments (
+                        PaymentID INTEGER PRIMARY KEY AUTOINCREMENT,
+                        BookingID INTEGER,
+                        UserID INTEGER,
+                        Amount REAL NOT NULL,
+                        Status TEXT NOT NULL, 
+                        TransactionDate DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        PaymentMethod TEXT,
+                        FOREIGN KEY (BookingID) REFERENCES BookingRequests(RequestID),
+                        FOREIGN KEY (UserID) REFERENCES Users(UserID)
+                    )
                     ''')
     conn.commit()
     conn.close()

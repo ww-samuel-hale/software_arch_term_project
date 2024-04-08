@@ -7,12 +7,12 @@ import secrets
 from Builder import ConcreteCarListingBuilder, CarDirector
 from Db import get_db_connection, db_initialization
 from Observer import BookingManager, Observer
-
+from Payment import PaymentProxy
+from PasswordRecovery import PasswordRecoveryChain
 
 app = Flask(__name__)
 CORS(app)
 app.secret_key = secrets.token_urlsafe(16)  # Set a secret key for sessions
-
 
 ### AUTHENTICATION SINGLETONS ###
 class User(Observer):
@@ -50,16 +50,40 @@ class User(Observer):
         finally:
             conn.close()
             
-    def update(self, subject, message, related_id):
-        user_id = message['user_id']
+    def update(self, subject, message, booking_request_id, booking_request=None):
         conn = get_db_connection()
         cursor = conn.cursor()
+        if booking_request is not None:
+            # Retrieve the requester ID and listing ID for this booking request
+            requester_id = booking_request['RequesterID']
+            listing_id = booking_request['ListingID']
+            
+        else:
+            # Retrieve the requester ID and listing ID for this booking request
+            cursor.execute('SELECT RequesterID, ListingID FROM BookingRequests WHERE RequestID = ?', (booking_request_id,))
+            booking_request = cursor.fetchone()
+            requester_id = booking_request['RequesterID']
+            listing_id = booking_request['ListingID']
+            
+        # Find the owner ID of the listing
+        owner_id = get_owner_id_by_listing_id(listing_id)
+
+        # Create a notification for the requester
         cursor.execute('''
             INSERT INTO Notifications (UserID, Message, RelatedEntityID)
-            VALUES (?, ?)
-        ''', (self.user_id, message, related_id))
+            VALUES (?, ?, ?)
+        ''', (requester_id, message, booking_request_id))
+        
+        # Create a notification for the owner (requestee) if they are not the requester
+        if requester_id != owner_id:
+            cursor.execute('''
+                INSERT INTO Notifications (UserID, Message, RelatedEntityID)
+                VALUES (?, ?, ?)
+            ''', (owner_id, message, booking_request_id))
+
         conn.commit()
         conn.close()
+
 
     @staticmethod
     def authenticate(email, password):
@@ -115,6 +139,15 @@ def get_current_user():
         return user
     else:
         return None
+    
+def get_owner_id_by_listing_id(listing_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT OwnerID FROM CarListing WHERE ListingID = ?', (listing_id,))
+    owner = cursor.fetchone()
+    conn.close()
+    return owner['OwnerID'] if owner else None
+
 
 
 ### AUTHENTICATION ENDPOINTS ###
@@ -511,20 +544,93 @@ def get_notifications():
     conn.close()
     return jsonify(notifications)
 
-@app.route('/notifications/<int:notification_id>', methods=['PUT'])
+@app.route('/notifications/<int:notification_id>', methods=['DELETE'])
 @login_required
-def acknowledge_notification(notification_id):
+def delete_notification(notification_id):
     user_id = session['user_id']
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE Notifications
-        SET Acknowledged = 1
+        DELETE FROM Notifications
         WHERE NotificationID = ? AND UserID = ?
     ''', (notification_id, user_id))
     conn.commit()
     conn.close()
-    return 'Notification acknowledged', 200
+    return 'Notification deleted', 200
+
+### PAYMENT ENDPOINTS ###
+# This is an endpoint that might handle the payment action from the frontend.
+@app.route('/process-payment', methods=['POST'])
+@login_required
+def process_payment():
+    data = request.json
+    booking_id = data['booking_id']
+    amount = data['amount']  # The amount to be paid
+    user_id = session['user_id']  # The ID of the user making the payment
+    # Get user email
+    user = get_current_user()
+    requester = User(user['Email'], '', [])
+    booking_manager = BookingManager()
+    booking_manager.attach(requester)
+    # Here we would have logic to ensure the booking is confirmed and ready for payment
+
+    payment_proxy = PaymentProxy()
+    payment_result = payment_proxy.process_payment(amount, booking_id, user_id)
+
+    if "successfully" in payment_result:
+        # Update booking status to 'Paid' or similar
+        # Notify both parties
+        booking_manager.notify(f"Payment for booking {booking_id} processed successfully", booking_id)
+        booking_manager.detach(requester)
+        return jsonify({'message': 'Payment processed successfully'}), 200
+    else:
+        # Inform the renter of payment failure
+        return jsonify({'message': 'Payment failed, please try again'}), 400
+    
+### PASSWORD RECOVERY ENDPOINTS ###
+@app.route('/recover-password', methods=['POST'])
+def recover_password():
+    data = request.json
+    email = data['email']
+    provided_answers = data['answers']
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT UserID FROM Users WHERE Email = ?', (email,))
+    user_record = cursor.fetchone()
+
+    if not user_record:
+        conn.close()
+        return 'User not found', 404
+
+    user_id = user_record['UserID']
+    recovery_chain = PasswordRecoveryChain(user_id)
+    recovery_chain.setup_chain()
+
+    if recovery_chain.verify_answers(provided_answers):
+        return 'Please enter a password in to reset', 200
+    else:
+        return 'One or more security answers were incorrect.', 403
+    
+@app.route('/reset-password', methods=['POST'])
+def reset_password():
+    data = request.json
+    user_id = data['user_id']
+    new_password = data['new_password']
+
+    # It's a good idea to perform some password strength validation here
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Update the user's password
+    hashed_password = generate_password_hash(new_password)
+    cursor.execute('UPDATE Users SET Password = ? WHERE UserID = ?', (hashed_password, user_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'message': 'Your password has been updated successfully.'}), 200
+
 
 
 if __name__ == '__main__':

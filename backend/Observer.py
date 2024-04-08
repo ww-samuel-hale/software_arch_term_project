@@ -12,12 +12,12 @@ class Subject:
     def detach(self, observer):
         self._observers.remove(observer)
 
-    def notify(self, message, related_id):
+    def notify(self, message, related_id, booking_request=None):
         for observer in self._observers:
-            observer.update(self, message, related_id)
+            observer.update(self, message, related_id, booking_request)
 
 class Observer:
-    def update(self, subject, message, related_id):
+    def update(self, subject, message, related_id, booking_request=None):
         pass
 
 class BookingManager(Subject):
@@ -79,11 +79,10 @@ class BookingManager(Subject):
         cursor.execute('''
             SELECT * FROM Availability
             WHERE ListingID = ?
-            AND StartDate = ? AND EndDate = ?
-        ''', (listing_id, end_date, start_date))
+            AND StartDate <= ? AND EndDate >= ?
+        ''', (listing_id, start_date, end_date))
         available = cursor.fetchall()
-        print(f"Availability for listing {listing_id}: {available}")
-        return len(available) == 0  # If there are no conflicting records, it's available
+        return len(available) > 0  # If there are no conflicting records, it's available
 
 
     def create_booking(self, booking_details):
@@ -102,7 +101,7 @@ class BookingManager(Subject):
             # Create the booking
             cursor.execute('''
                 INSERT INTO BookingRequests (ListingID, RequesterID, StartDate, EndDate, Status)
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
             ''', (
                 booking_details['listing_id'],
                 booking_details['renter_id'],
@@ -113,7 +112,7 @@ class BookingManager(Subject):
             booking_request_id = cursor.lastrowid
             
             conn.commit()
-            self.notify(f"Booking Request {booking_request_id} created", booking_request_id)  # Notify observers
+            self.notify(f"Booking Request {booking_request_id} created", booking_request_id, None)  # Notify observers
             conn.close()
             return booking_request_id
         except sqlite3.IntegrityError as e:
@@ -144,9 +143,21 @@ class BookingManager(Subject):
                     booking_request['StartDate'],
                     booking_request['EndDate']
                 )
+                
+                # Need to calculate booking amount and create a payment record here
+                # Get amount from the listing table
+                cursor.execute('''
+                    SELECT RentalPricing FROM CarListing WHERE ListingID = ?
+                ''', (booking_request['ListingID'],))
+                amount = cursor.fetchone()['RentalPricing']
+                
+                cursor.execute('''
+                    INSERT INTO Payments (BookingID, UserID, Amount, Status, PaymentMethod)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (booking_request_id, booking_request['RequesterID'], amount, 'Pending', 'Wallet'))
 
                 conn.commit()
-                self.notify(f"Booking Request {booking_request_id} confirmed", booking_request_id)  # Notify observers
+                self.notify(f"Booking Request {booking_request_id} confirmed", booking_request_id, None)  # Notify observers
                 success = True
             else:
                 success = False
@@ -165,6 +176,12 @@ class BookingManager(Subject):
         conn = get_db_connection()
         cursor = conn.cursor()
         try:
+            # Retrieve the booking request details
+            cursor.execute('''
+                SELECT RequesterID, ListingID FROM BookingRequests WHERE RequestID = ?
+            ''', (booking_request_id,))
+            booking_request = cursor.fetchone()
+            
             # Delete the booking request
             cursor.execute('''
                 DELETE FROM BookingRequests WHERE RequestID = ?
@@ -174,7 +191,7 @@ class BookingManager(Subject):
             conn.commit()
 
             if affected_rows > 0:
-                self.notify(f"Booking Request {booking_request_id} rejected and deleted", booking_request_id)  # Notify observers
+                self.notify(f"Booking Request {booking_request_id} rejected and deleted", booking_request_id, booking_request)  # Notify observers
                 success = True
             else:
                 success = False  # No record was found/deleted
@@ -193,6 +210,12 @@ class BookingManager(Subject):
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Retrieve the booking request details
+        cursor.execute('''
+            SELECT ListingID, StartDate, EndDate FROM BookingRequests WHERE RequestID = ?
+        ''', (booking_request_id,))
+        booking_request = cursor.fetchone()
+
         # Delete the booking request
         cursor.execute('''
             DELETE FROM BookingRequests WHERE RequestID = ?
@@ -202,7 +225,7 @@ class BookingManager(Subject):
         conn.commit()
 
         if affected_rows > 0:
-            self.notify(f"Booking request {booking_request_id} canceled and deleted", booking_request_id)  # Notify observers
+            self.notify(f"Booking request {booking_request_id} canceled and deleted", booking_request_id, booking_request)  # Notify observers
             success = True
         else:
             success = False  # No record was found/deleted
