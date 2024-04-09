@@ -1,18 +1,54 @@
-/* Styles for the Home component */
 .home-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh; /* Make it at least as tall as the viewport */
+    text-align: center;
     padding: 20px;
-    background-color: #f7f7f7; /* Light grey background */
 }
 
-.home-container h1 {
-    color: #333; /* Dark grey color for the text */
-    font-size: 2rem; /* 2 times the base font size */
-    margin-bottom: 20px; /* Space below the heading */
+.search-bar-container {
+    background: #FFFFFF;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    margin-bottom: 20px; /* Space between the search bar and the welcome message */
+    max-width: 600px; /* Adjust as needed */
+    margin-left: auto;
+    margin-right: auto;
+    display: inline-block;
 }
 
-/* Add your additional styles below */
+.search-form {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.input-container {
+    position: relative;
+    flex-grow: 1;
+}
+
+.search-input {
+    width: 100%;
+    padding: 10px 15px;
+    border: 1px solid #CCCCCC;
+    border-radius: 4px;
+    margin-bottom: 10px; /* If you want space between inputs */
+}
+
+.search-button {
+    padding: 15px 30px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0; /* Prevents the button from shrinking */
+    white-space: nowrap; /* Keeps the text on one line */
+}
+
+.search-button:hover {
+    background-color: #0056b3;
+}
+
+.home__form {
+    width: 800px;
+}

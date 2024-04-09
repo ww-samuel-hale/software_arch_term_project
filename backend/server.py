@@ -1,6 +1,7 @@
 import sqlite3
 from flask import Flask, request, session, g, jsonify
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import secrets
@@ -11,8 +12,12 @@ from Payment import PaymentProxy
 from PasswordRecovery import PasswordRecoveryChain
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "http://127.0.0.1:3000"]}}, supports_credentials=True)
 app.secret_key = secrets.token_urlsafe(16)  # Set a secret key for sessions
+
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 ### AUTHENTICATION SINGLETONS ###
 class User(Observer):
@@ -159,11 +164,11 @@ def register():
     save_status = user.save_to_db()
 
     if save_status == 'email_exists':
-        return 'Email already registered', 409
+        return jsonify(message='Email already registered'), 409
     elif save_status == 'registration_successful':
-        return 'Registered successfully', 201
+        return jsonify(message='Registered successfully'), 201
     else:
-        return 'Registration failed due to a database error', 500
+        return jsonify(message='Registration failed due to a database error'), 500
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -171,15 +176,15 @@ def login():
     user = User.authenticate(data['email'], data['password'])
     if user:
         UserSession.get_instance().login(user)
-        return 'Logged in successfully', 200
+        return jsonify({'message': 'Logged in successfully'}), 200
     else:
-        return 'Login failed', 401
+        return jsonify({'message': 'Login failed'}), 401
 
 @app.route('/logout', methods=['GET'])
 @login_required
 def logout():
     UserSession.get_instance().logout()
-    return 'Logged out successfully'
+    return jsonify({'message': 'Logged out successfully'})
 
 ### CAR LISTING ENDPOINTS ###
 @app.route('/create-listing', methods=['POST'])
@@ -330,6 +335,40 @@ def cancel_booking_endpoint(booking_id):
         return jsonify({'message': 'Booking cancelled successfully'}), 200
     else:
         return jsonify({'message': 'Booking cancellation failed'}), 500
+    
+@app.route('/fetch-bookings', methods=['GET'])
+@login_required
+def fetch_bookings():
+    user_id = session['user_id']  # Assumes the user_id is stored in session when logged in
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Fetch bookings where the user is the requester
+    cursor.execute('''
+        SELECT br.*, 'requester' AS Role FROM BookingRequests br
+        WHERE br.RequesterID = ?
+    ''', (user_id,))
+    requester_bookings = cursor.fetchall()
+    
+    # Fetch bookings where the user is the requestee (owner of the listing)
+    cursor.execute('''
+        SELECT br.*, 'requestee' AS Role FROM BookingRequests br
+        INNER JOIN CarListing cl ON br.ListingID = cl.ListingID
+        WHERE cl.OwnerID = ?
+    ''', (user_id,))
+    requestee_bookings = cursor.fetchall()
+
+    # Combine the bookings and sort by StartDate
+    all_bookings = list(requester_bookings) + list(requestee_bookings)
+    all_bookings.sort(key=lambda x: x['StartDate'])
+    
+    conn.close()
+
+    # Convert bookings to dictionaries to make them JSON serializable
+    bookings_as_dict = [dict(booking) for booking in all_bookings]
+    
+    return jsonify(bookings_as_dict)
+
 
 ### SEARCH ENDPOINTS ###
 @app.route('/filter-listings', methods=['POST'])
@@ -415,62 +454,90 @@ def search_available_cars():
     cursor = conn.cursor()
     cursor.execute(query, (pickup_location, to_date, from_date, user_id))
     available_cars = cursor.fetchall()
+    car_list = []
+    for car in available_cars:
+        cursor.execute("SELECT * FROM Availability WHERE ListingID = ?", (car['ListingID'],))
+        availabilities = cursor.fetchall()
+        availability = []
+        for availability_row in availabilities:
+            availability.append({
+                'start_date': availability_row['StartDate'],
+                'end_date': availability_row['EndDate']
+            })
+        car_dict = dict(car)
+        car_dict['availability'] = availability
+        car_list.append(car_dict)
+    conn.close()
+    return jsonify(car_list)
     conn.close()
 
-    # Convert query results into a list of dictionaries to jsonify the response
-    columns = [column[0] for column in cursor.description]
-    result = [dict(zip(columns, row)) for row in available_cars]
-
-    return jsonify(result)
-
 ### MESSAGING ENDPOINTS ###
-@app.route('/conversations', methods=['GET'])
+@socketio.on('get_conversations')
 @login_required
 def get_conversations():
     user_id = session['user_id']
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # Retrieve conversations and the latest message in each conversation
     cursor.execute('''
-        SELECT * FROM Conversations
-        WHERE Participant1ID = ? OR Participant2ID = ?
+        SELECT c.ConversationID, c.Participant1ID, c.Participant2ID, m.Content as LatestMessage, m.Timestamp
+        FROM Conversations c
+        LEFT JOIN Messages m ON m.MessageID = (
+            SELECT MessageID FROM Messages WHERE ConversationID = c.ConversationID ORDER BY Timestamp DESC LIMIT 1
+        )
+        WHERE c.Participant1ID = ? OR c.Participant2ID = ?
     ''', (user_id, user_id))
+    
     conversations = cursor.fetchall()
     conn.close()
-    return jsonify(conversations)
+    emit('conversations', [dict(conv) for conv in conversations])
 
 
-@app.route('/conversations/<int:conversation_id>', methods=['GET'])
+
+@socketio.on('get_messages')
 @login_required
 def get_messages(conversation_id):
     user_id = session['user_id']
     conn = get_db_connection()
     cursor = conn.cursor()
+    
     # Validate that the user is part of the conversation
     cursor.execute('''
         SELECT * FROM Conversations
         WHERE ConversationID = ? AND (Participant1ID = ? OR Participant2ID = ?)
     ''', (conversation_id, user_id, user_id))
     conversation = cursor.fetchone()
+    
     if not conversation:
         conn.close()
-        return 'Unauthorized', 403
+        emit('unauthorized', {'status': 403})
+        return
     
+    # Fetch messages and sender details
     cursor.execute('''
-        SELECT * FROM Messages WHERE ConversationID = ?
+        SELECT m.*, u.Email as SenderEmail
+        FROM Messages m
+        JOIN Users u ON m.SenderID = u.UserID
+        WHERE m.ConversationID = ?
     ''', (conversation_id,))
+    
     messages = cursor.fetchall()
     conn.close()
-    return jsonify(messages)
+    emit('messages', [dict(msg) for msg in messages])
 
 
-@app.route('/conversations/<int:conversation_id>', methods=['POST'])
+
+@socketio.on('send_message')
 @login_required
-def send_message(conversation_id):
+def send_message(data):
     user_id = session['user_id']
-    content = request.json.get('content')
+    conversation_id = data['conversation_id']
+    content = data['content']
 
     if not content:
-        return 'No message content provided', 400
+        emit('error', 'No message content provided')
+        return
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -480,57 +547,72 @@ def send_message(conversation_id):
         SELECT * FROM Conversations
         WHERE ConversationID = ? AND (Participant1ID = ? OR Participant2ID = ?)
     ''', (conversation_id, user_id, user_id))
-    conversation = cursor.fetchone()
-    if not conversation:
+    
+    if cursor.fetchone() is None:
         conn.close()
-        return 'Unauthorized', 403
+        emit('error', 'Unauthorized')
+        return
 
+    # Insert the message
     cursor.execute('''
         INSERT INTO Messages (ConversationID, SenderID, Content)
         VALUES (?, ?, ?)
     ''', (conversation_id, user_id, content))
     conn.commit()
-    conn.close()
-    return 'Message sent', 200
 
-@app.route('/start-conversation', methods=['POST'])
+    # Retrieve the message to send back its full data, including the timestamp
+    message_id = cursor.lastrowid
+    cursor.execute('SELECT * FROM Messages WHERE MessageID = ?', (message_id,))
+    message = cursor.fetchone()
+
+    conn.close()
+
+    # Emit the new message to all participants in the conversation
+    emit('new_message', message, room=str(conversation_id))
+
+
+@socketio.on('start_conversation')
 @login_required
-def start_conversation():
+def start_conversation(owner_id):
     # User ID of the person initiating the conversation (the renter)
     renter_id = session['user_id']
-    # Get owner ID from the request to start a conversation with
-    data = request.json
-    owner_id = data.get('owner_id')
 
     if not owner_id:
-        return 'Owner ID must be provided', 400
+        emit('error', {'message': 'Owner ID must be provided'}, 400)
+        return
 
-    # Avoid creating duplicate conversations between the same two people
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    # Check for existing conversation between the two users
     cursor.execute('''
         SELECT * FROM Conversations
         WHERE (Participant1ID = ? AND Participant2ID = ?) OR (Participant1ID = ? AND Participant2ID = ?)
     ''', (renter_id, owner_id, owner_id, renter_id))
-    
     existing_conversation = cursor.fetchone()
-    
-    # If a conversation already exists, return its ID
+
+    # If a conversation exists, return detailed conversation data
     if existing_conversation:
         conn.close()
-        return jsonify({'conversation_id': existing_conversation['ConversationID']}), 200
+        emit('conversation', dict(existing_conversation))
+        return
 
-    # If not, create a new conversation
+    # Create a new conversation if none exists
     cursor.execute('''
         INSERT INTO Conversations (Participant1ID, Participant2ID)
         VALUES (?, ?)
     ''', (renter_id, owner_id))
+    conn.commit()
 
     conversation_id = cursor.lastrowid
-    conn.commit()
+
+    # Retrieve the newly created conversation to return consistent data
+    cursor.execute('SELECT * FROM Conversations WHERE ConversationID = ?', (conversation_id,))
+    new_conversation = cursor.fetchone()
     conn.close()
-    return jsonify({'conversation_id': conversation_id}), 201
+
+    emit('conversation', dict(new_conversation))
+
 
 ### NOTIFICATION ENDPOINTS ###
 @app.route('/notifications', methods=['GET'])
@@ -556,7 +638,7 @@ def delete_notification(notification_id):
     ''', (notification_id, user_id))
     conn.commit()
     conn.close()
-    return 'Notification deleted', 200
+    return jsonify({'message': 'Notification deleted'}), 200
 
 ### PAYMENT ENDPOINTS ###
 # This is an endpoint that might handle the payment action from the frontend.
@@ -601,16 +683,16 @@ def recover_password():
 
     if not user_record:
         conn.close()
-        return 'User not found', 404
+        return jsonify({'message': 'User not found'}), 404
 
     user_id = user_record['UserID']
     recovery_chain = PasswordRecoveryChain(user_id)
     recovery_chain.setup_chain()
 
     if recovery_chain.verify_answers(provided_answers):
-        return 'Please enter a password in to reset', 200
+        return jsonify({'message': 'Please enter a password to reset'}), 200
     else:
-        return 'One or more security answers were incorrect.', 403
+        return jsonify({'message': 'One or more security answers were incorrect.'}), 403
     
 @app.route('/reset-password', methods=['POST'])
 def reset_password():
@@ -631,8 +713,48 @@ def reset_password():
     
     return jsonify({'message': 'Your password has been updated successfully.'}), 200
 
+@app.route('/my-cars', methods=['GET'])
+@login_required
+def get_my_cars():
+    user_id = session['user_id']
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM CarListing WHERE OwnerID = ?", (user_id,))
+    cars = cursor.fetchall()
+    car_list = []
+    for car in cars:
+        cursor.execute("SELECT * FROM Availability WHERE ListingID = ?", (car['ListingID'],))
+        availabilities = cursor.fetchall()
+        availability = []
+        for availability_row in availabilities:
+            availability.append({
+                'start_date': availability_row['StartDate'],
+                'end_date': availability_row['EndDate']
+            })
+        car_dict = dict(car)
+        car_dict['availability'] = availability
+        car_list.append(car_dict)
+    conn.close()
+    return jsonify(car_list)
+
+@app.route('/my-cars-availabilities', methods=['GET'])
+@login_required
+def get_my_cars_availabilities():
+    user_id = session['user_id']
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM Availability WHERE ListingID IN (SELECT ListingID FROM CarListing WHERE OwnerID = ?)', (user_id,))
+    availabilities = cursor.fetchall()
+    conn.close()
+    
+    columns = [column[0] for column in cursor.description]
+    availabilities = [dict(zip(columns, row)) for row in availabilities]
+    return jsonify(availabilities)
+
+
+
 
 
 if __name__ == '__main__':
     db_initialization()  # Initialize the database tables
-    app.run(debug=True)
+    app.run(host='0.0.0.0', debug=True)

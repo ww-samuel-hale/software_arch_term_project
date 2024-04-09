@@ -32,6 +32,20 @@ const NavBar = () => {
         navigate('/register');
     };
 
+    const handleCarList = () => {
+        navigate('/car-list');
+    }
+
+    const handleViewCars = () => {
+        // I just want it to navigate the user to /view-cars
+        navigate('/view-cars');
+    };
+
+    const handleViewBookings = () => {
+        // I just want it to navigate the user to /view-bookings
+        navigate('/view-bookings');
+    };
+
     const submitLogin = async (event) => {
         event.preventDefault();
         const email = event.target.email.value;
@@ -41,7 +55,7 @@ const NavBar = () => {
                 "email": email,
                 "password": password
             }
-            const response = await post('/login', data);
+            const response = await post('login', data);
             login();
             setShowLoginForm(false);
             setLoginError('');
@@ -58,6 +72,9 @@ const NavBar = () => {
                 <div>DriveShare</div>
             </Link>
             <div className="navbar-menu">
+                {user && <button onClick={handleViewBookings}>Bookings</button>}
+                {user && <button onClick={handleViewCars}>Your Cars</button>}
+                {user && <button onClick={handleCarList}>List Car</button>}
                 <button onClick={handleLoginClick}>{user ? 'Logout' : 'Log In'}</button>
                 {!user && <button onClick={handleRegister}>Sign up</button>}
             </div>
